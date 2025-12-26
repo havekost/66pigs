@@ -21,16 +21,28 @@ export interface TableRow {
 }
 
 // Game state
-export type GamePhase = 'waiting' | 'selecting' | 'revealing' | 'placing' | 'finished';
+export type GamePhase = 'waiting' | 'selecting' | 'revealing' | 'placing' | 'row_selection' | 'finished';
+
+export interface RevealedCard {
+  playerId: string;
+  playerName: string;
+  card: Card;
+}
 
 export interface GameState {
   phase: GamePhase;
   round: number;
   tableRows: TableRow[];
   currentPlayerIndex: number;
-  revealedCards: { playerId: string; card: Card }[];
+  revealedCards: RevealedCard[];
   pendingPlacements: { playerId: string; card: Card }[];
   lastAction: string | null;
+  // For row selection when a player's card is lower than all rows
+  pendingRowSelection?: {
+    playerId: string;
+    playerName: string;
+    card: Card;
+  } | null;
 }
 
 // Lobby types

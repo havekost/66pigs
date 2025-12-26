@@ -188,9 +188,9 @@ export const takeRow = (
 /**
  * Sort revealed cards by number (lowest first for placement order)
  */
-export const sortRevealedCards = (
-  revealed: { playerId: string; card: Card }[]
-): { playerId: string; card: Card }[] => {
+export const sortRevealedCards = <T extends { card: Card }>(
+  revealed: T[]
+): T[] => {
   return [...revealed].sort((a, b) => a.card.number - b.card.number);
 };
 
@@ -244,4 +244,33 @@ export const initializeGame = (numPlayers: number): {
   };
 
   return { gameState, hands };
+};
+
+/**
+ * Start a new round while keeping the existing table rows
+ * This is called at the end of a round when all hands are empty
+ */
+export const startNewRound = (
+  numPlayers: number,
+  existingRows: TableRow[]
+): {
+  hands: Card[][];
+  cardsOnTable: number[];
+} => {
+  // Get all card numbers currently on the table
+  const cardsOnTable: number[] = [];
+  for (const row of existingRows) {
+    for (const card of row.cards) {
+      cardsOnTable.push(card.number);
+    }
+  }
+
+  // Create a deck excluding cards already on the table
+  let deck = createDeck().filter(card => !cardsOnTable.includes(card.number));
+  deck = shuffleDeck(deck);
+
+  // Deal 10 cards to each player
+  const { hands } = dealCards(deck, numPlayers);
+
+  return { hands, cardsOnTable };
 };
