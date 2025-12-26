@@ -81,46 +81,65 @@ export const LobbyScreen: React.FC<LobbyScreenProps> = ({ navigation, route }) =
 
   // Set up real-time subscription
   useEffect(() => {
-    fetchLobbyData();
+    let lobbyChannel: ReturnType<typeof supabase.channel> | null = null;
 
-    // Subscribe to lobby changes
-    const lobbyChannel = supabase
-      .channel(`lobby:${lobbyCode}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'lobbies',
-          filter: `code=eq.${lobbyCode}`,
-        },
-        (payload) => {
-          if (payload.eventType === 'UPDATE') {
-            const updatedLobby = payload.new as Lobby;
-            setLobby(updatedLobby);
+    const setupSubscription = async () => {
+      // First fetch initial data
+      await fetchLobbyData();
 
-            if (updatedLobby.status === 'playing') {
-              navigation.replace('Game', { lobbyCode });
+      // Get lobby ID for filtering
+      const { data: lobbyData } = await supabase
+        .from('lobbies')
+        .select('id')
+        .eq('code', lobbyCode)
+        .single();
+
+      if (!lobbyData) return;
+
+      // Subscribe to lobby changes with proper filters
+      lobbyChannel = supabase
+        .channel(`lobby:${lobbyCode}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'lobbies',
+            filter: `code=eq.${lobbyCode}`,
+          },
+          (payload) => {
+            if (payload.eventType === 'UPDATE') {
+              const updatedLobby = payload.new as Lobby;
+              setLobby(updatedLobby);
+
+              if (updatedLobby.status === 'playing') {
+                navigation.replace('Game', { lobbyCode });
+              }
             }
           }
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'lobby_players',
-        },
-        () => {
-          // Refetch players when there's a change
-          fetchLobbyData();
-        }
-      )
-      .subscribe();
+        )
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'lobby_players',
+            filter: `lobby_id=eq.${lobbyData.id}`,
+          },
+          () => {
+            // Refetch players when there's a change
+            fetchLobbyData();
+          }
+        )
+        .subscribe();
+    };
+
+    setupSubscription();
 
     return () => {
-      supabase.removeChannel(lobbyChannel);
+      if (lobbyChannel) {
+        supabase.removeChannel(lobbyChannel);
+      }
     };
   }, [lobbyCode, fetchLobbyData, navigation]);
 
