@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,6 +7,7 @@ import {
   ScrollView,
   Alert,
   Modal,
+  Animated,
 } from 'react-native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { RouteProp } from '@react-navigation/native';
@@ -21,6 +22,7 @@ import {
   GameState,
   Card,
   TableRow as TableRowType,
+  RevealedCard,
 } from '../types';
 import {
   findRowForCard,
@@ -30,6 +32,7 @@ import {
   isGameOver,
   getWinner,
   initializeGame,
+  startNewRound,
 } from '../utils/gameLogic';
 
 type GameScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'Game'>;
@@ -53,6 +56,11 @@ export const GameScreen: React.FC<GameScreenProps> = ({ navigation, route }) => 
   const [pendingCard, setPendingCard] = useState<Card | null>(null);
   const [showGameOver, setShowGameOver] = useState(false);
   const [winner, setWinner] = useState<LobbyPlayer | null>(null);
+  const [revealCountdown, setRevealCountdown] = useState<number | null>(null);
+  const [localRevealedCards, setLocalRevealedCards] = useState<RevealedCard[]>([]);
+
+  // Animation values for revealed cards
+  const cardAnimations = useRef<Animated.Value[]>([]).current;
 
   const currentPlayer = players.find((p) => p.player_id === playerId);
   const isHost = lobby?.host_id === playerId;
@@ -217,6 +225,7 @@ export const GameScreen: React.FC<GameScreenProps> = ({ navigation, route }) => 
     }
   };
 
+  // Start the reveal phase - show all cards first, then place them after 5 seconds
   const processRevealAndPlace = async () => {
     if (!lobby || !gameState || isProcessing) return;
 
@@ -229,128 +238,53 @@ export const GameScreen: React.FC<GameScreenProps> = ({ navigation, route }) => 
     setIsProcessing(true);
 
     try {
-      // Get all selected cards
-      const revealed = players
+      // Get all selected cards with player names
+      const revealed: RevealedCard[] = players
         .filter((p) => p.selected_card)
         .map((p) => ({
           playerId: p.player_id,
+          playerName: p.nickname,
           card: p.selected_card as Card,
         }));
 
       // Sort by card number (lowest first)
-      const sorted = sortRevealedCards(revealed);
-      let currentRows = [...gameState.tableRows];
-      const playerScoreUpdates: { [playerId: string]: number } = {};
+      const sorted = sortRevealedCards(revealed) as RevealedCard[];
 
-      // Process each card
-      for (const { playerId: pid, card } of sorted) {
-        const player = players.find((p) => p.player_id === pid);
-        if (!player) continue;
+      // Update game state to revealing phase with the revealed cards
+      const revealingState: GameState = {
+        ...gameState,
+        phase: 'revealing',
+        revealedCards: sorted,
+      };
 
-        const rowIndex = findRowForCard(card, currentRows);
-
-        if (rowIndex === -1) {
-          // Card is lower than all rows - player must take a row
-          // For now, automatically take the row with fewest pigs
-          let minPigs = Infinity;
-          let minIndex = 0;
-          for (let i = 0; i < currentRows.length; i++) {
-            const pigs = currentRows[i].cards.reduce((sum, c) => sum + c.pigs, 0);
-            if (pigs < minPigs) {
-              minPigs = pigs;
-              minIndex = i;
-            }
-          }
-
-          const { newRows, pigsTaken } = takeRow(card, minIndex, currentRows);
-          currentRows = newRows;
-          playerScoreUpdates[pid] = (playerScoreUpdates[pid] || 0) + pigsTaken;
-        } else {
-          // Place card in the appropriate row
-          const { newRows, pigsTaken } = placeCardInRow(card, rowIndex, currentRows);
-          currentRows = newRows;
-          if (pigsTaken !== 0) {
-            playerScoreUpdates[pid] = (playerScoreUpdates[pid] || 0) + pigsTaken;
-          }
-        }
-      }
-
-      // Update player scores and remove selected cards from hands
-      for (const player of players) {
-        const scoreUpdate = playerScoreUpdates[player.player_id] || 0;
-        const newHand = player.hand.filter(
-          (c) => c.number !== player.selected_card?.number
-        );
-
-        await supabase
-          .from('lobby_players')
-          .update({
-            score: player.score + scoreUpdate,
-            hand: newHand,
-            selected_card: null,
-          })
-          .eq('id', player.id);
-      }
-
-      // Check if round is over (all hands empty)
-      // Guard: players must be loaded (length > 0) to avoid false positives
-      const allHandsEmpty = players.length > 0 && players.every(
-        (p) => p.hand.filter((c) => c.number !== p.selected_card?.number).length === 0
-      );
-
-      // Check for game over
-      const updatedPlayers = players.map((p) => ({
-        ...p,
-        score: p.score + (playerScoreUpdates[p.player_id] || 0),
-      }));
-
-      const gameOver = updatedPlayers.some((p) => p.score >= 66);
-
-      let newGameState: GameState;
-
-      if (gameOver) {
-        newGameState = {
-          ...gameState,
-          phase: 'finished',
-          tableRows: currentRows,
-          revealedCards: [],
-          pendingPlacements: [],
-        };
-      } else if (allHandsEmpty) {
-        // Start a new round
-        const { gameState: freshState, hands } = initializeGame(players.length);
-        newGameState = {
-          ...freshState,
-          round: gameState.round + 1,
-        };
-
-        // Deal new cards
-        for (let i = 0; i < players.length; i++) {
-          await supabase
-            .from('lobby_players')
-            .update({
-              hand: hands[i],
-              selected_card: null,
-            })
-            .eq('id', players[i].id);
-        }
-      } else {
-        newGameState = {
-          ...gameState,
-          phase: 'selecting',
-          tableRows: currentRows,
-          revealedCards: [],
-          pendingPlacements: [],
-        };
-      }
-
-      // Update game state
       await supabase
         .from('lobbies')
-        .update({ game_state: newGameState })
+        .update({ game_state: revealingState })
         .eq('id', lobby.id);
 
-      setSelectedCard(null);
+      // Store revealed cards locally for display
+      setLocalRevealedCards(sorted);
+
+      // Start countdown
+      setRevealCountdown(5);
+
+      // Wait 5 seconds before placing cards
+      await new Promise<void>((resolve) => {
+        let countdown = 5;
+        const interval = setInterval(() => {
+          countdown--;
+          setRevealCountdown(countdown);
+          if (countdown <= 0) {
+            clearInterval(interval);
+            setRevealCountdown(null);
+            resolve();
+          }
+        }, 1000);
+      });
+
+      // Now process the card placements
+      await processCardPlacements(sorted);
+
     } catch (error) {
       console.error('Error processing cards:', error);
     } finally {
@@ -358,38 +292,191 @@ export const GameScreen: React.FC<GameScreenProps> = ({ navigation, route }) => 
     }
   };
 
-  const handleSelectRow = async (rowIndex: number) => {
-    if (!pendingCard || !lobby || !gameState || !currentPlayer) return;
+  // Process card placements after reveal phase
+  const processCardPlacements = async (sorted: RevealedCard[]) => {
+    if (!lobby || !gameState) return;
 
-    try {
-      const { newRows, pigsTaken } = takeRow(pendingCard, rowIndex, gameState.tableRows);
+    let currentRows = [...gameState.tableRows];
+    const playerScoreUpdates: { [playerId: string]: number } = {};
+    const cardsNeedingRowSelection: RevealedCard[] = [];
 
-      // Update player score
+    // First pass: identify cards that need row selection and place normal cards
+    for (const revealedCard of sorted) {
+      const { playerId: pid, card } = revealedCard;
+      const rowIndex = findRowForCard(card, currentRows);
+
+      if (rowIndex === -1) {
+        // Card is lower than all rows - player must choose a row
+        cardsNeedingRowSelection.push(revealedCard);
+      } else {
+        // Place card in the appropriate row
+        const { newRows, pigsTaken } = placeCardInRow(card, rowIndex, currentRows);
+        currentRows = newRows;
+        if (pigsTaken !== 0) {
+          playerScoreUpdates[pid] = (playerScoreUpdates[pid] || 0) + pigsTaken;
+        }
+      }
+    }
+
+    // Handle cards that need row selection one by one
+    for (const revealedCard of cardsNeedingRowSelection) {
+      const { playerId: pid, playerName, card } = revealedCard;
+
+      if (pid === playerId) {
+        // Current player needs to select a row
+        setPendingCard(card);
+
+        // Update game state to row_selection phase
+        const rowSelectionState: GameState = {
+          ...gameState,
+          phase: 'row_selection',
+          tableRows: currentRows,
+          pendingRowSelection: { playerId: pid, playerName, card },
+        };
+
+        await supabase
+          .from('lobbies')
+          .update({ game_state: rowSelectionState })
+          .eq('id', lobby.id);
+
+        setShowRowSelection(true);
+
+        // Wait for player to select a row
+        const selectedRowIndex = await waitForRowSelection();
+
+        const { newRows, pigsTaken } = takeRow(card, selectedRowIndex, currentRows);
+        currentRows = newRows;
+        playerScoreUpdates[pid] = (playerScoreUpdates[pid] || 0) + pigsTaken;
+
+        setShowRowSelection(false);
+        setPendingCard(null);
+      } else {
+        // Another player needs to select - for now, auto-select smallest row
+        // In a full implementation, you'd wait for that player's selection via realtime
+        let minPigs = Infinity;
+        let minIndex = 0;
+        for (let i = 0; i < currentRows.length; i++) {
+          const pigs = currentRows[i].cards.reduce((sum, c) => sum + c.pigs, 0);
+          if (pigs < minPigs) {
+            minPigs = pigs;
+            minIndex = i;
+          }
+        }
+
+        const { newRows, pigsTaken } = takeRow(card, minIndex, currentRows);
+        currentRows = newRows;
+        playerScoreUpdates[pid] = (playerScoreUpdates[pid] || 0) + pigsTaken;
+      }
+    }
+
+    // Update player scores and remove selected cards from hands
+    for (const player of players) {
+      const scoreUpdate = playerScoreUpdates[player.player_id] || 0;
+      const newHand = player.hand.filter(
+        (c) => c.number !== player.selected_card?.number
+      );
+
       await supabase
         .from('lobby_players')
         .update({
-          score: currentPlayer.score + pigsTaken,
-          hand: currentPlayer.hand.filter((c) => c.number !== pendingCard.number),
+          score: player.score + scoreUpdate,
+          hand: newHand,
           selected_card: null,
         })
-        .eq('id', currentPlayer.id);
-
-      // Update game state
-      await supabase
-        .from('lobbies')
-        .update({
-          game_state: {
-            ...gameState,
-            tableRows: newRows,
-          },
-        })
-        .eq('id', lobby.id);
-
-      setShowRowSelection(false);
-      setPendingCard(null);
-    } catch (error) {
-      console.error('Error selecting row:', error);
+        .eq('id', player.id);
     }
+
+    // Check if round is over (all hands empty)
+    const allHandsEmpty = players.length > 0 && players.every(
+      (p) => p.hand.filter((c) => c.number !== p.selected_card?.number).length === 0
+    );
+
+    // Check for game over
+    const updatedPlayers = players.map((p) => ({
+      ...p,
+      score: p.score + (playerScoreUpdates[p.player_id] || 0),
+    }));
+
+    const gameOver = updatedPlayers.some((p) => p.score >= 66);
+
+    let newGameState: GameState;
+
+    if (gameOver) {
+      newGameState = {
+        ...gameState,
+        phase: 'finished',
+        tableRows: currentRows,
+        revealedCards: [],
+        pendingPlacements: [],
+        pendingRowSelection: null,
+      };
+    } else if (allHandsEmpty) {
+      // Start a new round - KEEP THE EXISTING TABLE ROWS
+      const { hands } = startNewRound(players.length, currentRows);
+
+      newGameState = {
+        phase: 'selecting',
+        round: gameState.round + 1,
+        tableRows: currentRows, // Keep existing rows!
+        currentPlayerIndex: 0,
+        revealedCards: [],
+        pendingPlacements: [],
+        lastAction: null,
+        pendingRowSelection: null,
+      };
+
+      // Deal new cards
+      for (let i = 0; i < players.length; i++) {
+        await supabase
+          .from('lobby_players')
+          .update({
+            hand: hands[i],
+            selected_card: null,
+          })
+          .eq('id', players[i].id);
+      }
+    } else {
+      newGameState = {
+        ...gameState,
+        phase: 'selecting',
+        tableRows: currentRows,
+        revealedCards: [],
+        pendingPlacements: [],
+        pendingRowSelection: null,
+      };
+    }
+
+    // Update game state
+    await supabase
+      .from('lobbies')
+      .update({ game_state: newGameState })
+      .eq('id', lobby.id);
+
+    setSelectedCard(null);
+    setLocalRevealedCards([]);
+  };
+
+  // Helper to wait for row selection
+  const rowSelectionResolver = useRef<((index: number) => void) | null>(null);
+
+  const waitForRowSelection = (): Promise<number> => {
+    return new Promise((resolve) => {
+      rowSelectionResolver.current = resolve;
+    });
+  };
+
+  const handleSelectRow = (rowIndex: number) => {
+    if (!pendingCard) return;
+
+    // If we have a resolver waiting, use it (new flow)
+    if (rowSelectionResolver.current) {
+      rowSelectionResolver.current(rowIndex);
+      rowSelectionResolver.current = null;
+      return;
+    }
+
+    // Fallback for legacy flow (shouldn't be needed but kept for safety)
+    console.warn('handleSelectRow called without resolver');
   };
 
   const handleReturnToLobby = async () => {
@@ -455,6 +542,38 @@ export const GameScreen: React.FC<GameScreenProps> = ({ navigation, route }) => 
         ))}
       </ScrollView>
 
+      {/* Revealed Cards Display - Show during revealing phase */}
+      {(gameState?.phase === 'revealing' || localRevealedCards.length > 0) && (
+        <View style={styles.revealedCardsContainer}>
+          <View style={styles.revealedCardsHeader}>
+            <Text style={styles.revealedCardsTitle}>Cards Revealed!</Text>
+            {revealCountdown !== null && (
+              <Text style={styles.countdownText}>
+                Placing in {revealCountdown}...
+              </Text>
+            )}
+          </View>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.revealedCardsContent}
+          >
+            {(localRevealedCards.length > 0 ? localRevealedCards : gameState?.revealedCards || []).map((revealed, index) => (
+              <View key={revealed.card.number} style={styles.revealedCardWrapper}>
+                <GameCard
+                  card={revealed.card}
+                  size="md"
+                  disabled
+                />
+                <Text style={styles.revealedCardPlayerName}>
+                  {revealed.playerName}
+                </Text>
+              </View>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
       {/* Game Table */}
       <ScrollView style={styles.gameTable} contentContainerStyle={styles.gameTableContent}>
         <Text style={styles.tableLabel}>Table</Text>
@@ -480,9 +599,23 @@ export const GameScreen: React.FC<GameScreenProps> = ({ navigation, route }) => 
           {gameState?.phase === 'selecting' && allSelected && (
             <Text style={styles.statusText}>All cards selected! Processing...</Text>
           )}
-          <Text style={styles.selectedCount}>
-            {playersWhoSelected}/{players.length} players ready
-          </Text>
+          {gameState?.phase === 'revealing' && (
+            <Text style={styles.statusText}>
+              Cards are being revealed! Watch the cards above...
+            </Text>
+          )}
+          {gameState?.phase === 'row_selection' && gameState.pendingRowSelection && (
+            <Text style={styles.statusText}>
+              {gameState.pendingRowSelection.playerId === playerId
+                ? 'Choose a row to take!'
+                : `${gameState.pendingRowSelection.playerName} is choosing a row...`}
+            </Text>
+          )}
+          {gameState?.phase === 'selecting' && (
+            <Text style={styles.selectedCount}>
+              {playersWhoSelected}/{players.length} players ready
+            </Text>
+          )}
         </View>
       </ScrollView>
 
@@ -614,6 +747,44 @@ const styles = StyleSheet.create({
   },
   playerBarItem: {
     marginRight: spacing.sm,
+  },
+  revealedCardsContainer: {
+    backgroundColor: colors.accent,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 2,
+    borderBottomColor: colors.accentDark,
+  },
+  revealedCardsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  revealedCardsTitle: {
+    fontSize: fontSize.lg,
+    fontWeight: fontWeight.bold,
+    color: colors.primaryDark,
+  },
+  countdownText: {
+    fontSize: fontSize.lg,
+    fontWeight: fontWeight.bold,
+    color: colors.primary,
+  },
+  revealedCardsContent: {
+    paddingHorizontal: spacing.md,
+    gap: spacing.md,
+  },
+  revealedCardWrapper: {
+    alignItems: 'center',
+    marginRight: spacing.md,
+  },
+  revealedCardPlayerName: {
+    marginTop: spacing.xs,
+    fontSize: fontSize.sm,
+    fontWeight: fontWeight.semibold,
+    color: colors.primaryDark,
+    textAlign: 'center',
   },
   gameTable: {
     flex: 1,
