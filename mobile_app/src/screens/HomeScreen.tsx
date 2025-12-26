@@ -138,11 +138,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation }) => {
         return;
       }
 
-      if (lobby.status !== 'waiting') {
-        Alert.alert('Game in Progress', 'This game has already started.');
-        return;
-      }
-
       // Check if player is already in the lobby
       const { data: existingPlayer } = await supabase
         .from('lobby_players')
@@ -151,6 +146,19 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({ navigation }) => {
         .eq('player_id', playerId)
         .single();
 
+      // If game is in progress, only allow existing players to rejoin
+      if (lobby.status === 'playing') {
+        if (existingPlayer) {
+          // Player is in this game - allow them to rejoin directly to the game
+          navigation.navigate('Game', { lobbyCode: code });
+          return;
+        } else {
+          Alert.alert('Game in Progress', 'This game has already started. You cannot join mid-game.');
+          return;
+        }
+      }
+
+      // Game is in waiting status - handle normal join
       if (!existingPlayer) {
         // Check player count (max 10 players for 6 Nimmt!)
         const { count } = await supabase

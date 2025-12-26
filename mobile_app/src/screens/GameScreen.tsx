@@ -66,8 +66,22 @@ export const GameScreen: React.FC<GameScreenProps> = ({ navigation, route }) => 
         .eq('code', lobbyCode)
         .single();
 
-      if (lobbyError || !lobbyData) {
-        Alert.alert('Error', 'Game not found.');
+      if (lobbyError) {
+        console.error('Error fetching lobby:', lobbyError);
+        // Don't immediately navigate away on error - could be temporary network issue
+        if (lobbyError.code === 'PGRST116') {
+          // No rows found - lobby actually doesn't exist
+          Alert.alert('Game Not Found', 'This game no longer exists.');
+          navigation.goBack();
+        } else {
+          // Network or other error - show message but don't navigate away
+          Alert.alert('Connection Error', 'Unable to connect to the game. Please check your connection and try again.');
+        }
+        return;
+      }
+
+      if (!lobbyData) {
+        Alert.alert('Game Not Found', 'This game no longer exists.');
         navigation.goBack();
         return;
       }
@@ -114,44 +128,66 @@ export const GameScreen: React.FC<GameScreenProps> = ({ navigation, route }) => 
 
   // Set up real-time subscription
   useEffect(() => {
-    fetchGameData();
+    let channel: ReturnType<typeof supabase.channel> | null = null;
 
-    const channel = supabase
-      .channel(`game:${lobbyCode}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'lobbies',
-          filter: `code=eq.${lobbyCode}`,
-        },
-        () => {
-          fetchGameData();
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'lobby_players',
-        },
-        () => {
-          fetchGameData();
-        }
-      )
-      .subscribe();
+    const setupSubscription = async () => {
+      // First fetch initial data
+      await fetchGameData();
+
+      // Get lobby ID for filtering
+      const { data: lobbyData } = await supabase
+        .from('lobbies')
+        .select('id')
+        .eq('code', lobbyCode)
+        .single();
+
+      if (!lobbyData) return;
+
+      // Set up subscription with proper filters
+      channel = supabase
+        .channel(`game:${lobbyCode}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'lobbies',
+            filter: `code=eq.${lobbyCode}`,
+          },
+          () => {
+            fetchGameData();
+          }
+        )
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'lobby_players',
+            filter: `lobby_id=eq.${lobbyData.id}`,
+          },
+          () => {
+            fetchGameData();
+          }
+        )
+        .subscribe();
+    };
+
+    setupSubscription();
 
     return () => {
-      supabase.removeChannel(channel);
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
     };
   }, [lobbyCode, fetchGameData]);
 
   // Check if all players have selected cards
   useEffect(() => {
     const checkAllSelected = async () => {
+      // Guard: Need valid state and at least 2 players loaded
       if (!gameState || !lobby || gameState.phase !== 'selecting') return;
+      if (players.length < 2) return; // Prevent processing before players are loaded
 
       const allSelected = players.every((p) => p.selected_card !== null);
 
@@ -183,6 +219,12 @@ export const GameScreen: React.FC<GameScreenProps> = ({ navigation, route }) => 
 
   const processRevealAndPlace = async () => {
     if (!lobby || !gameState || isProcessing) return;
+
+    // Additional guard: ensure we have valid players data
+    if (players.length < 2) {
+      console.warn('processRevealAndPlace called with insufficient players');
+      return;
+    }
 
     setIsProcessing(true);
 
@@ -251,7 +293,8 @@ export const GameScreen: React.FC<GameScreenProps> = ({ navigation, route }) => 
       }
 
       // Check if round is over (all hands empty)
-      const allHandsEmpty = players.every(
+      // Guard: players must be loaded (length > 0) to avoid false positives
+      const allHandsEmpty = players.length > 0 && players.every(
         (p) => p.hand.filter((c) => c.number !== p.selected_card?.number).length === 0
       );
 
